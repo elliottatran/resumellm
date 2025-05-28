@@ -3,11 +3,6 @@ import boto3
 from botocore.exceptions import ClientError
 import json
 
-with open('aws_account.txt') as f:
-    lines = f.readlines()
-    key_id = lines[0].strip()
-    access_key = lines[1].strip()
-
 textract_client = boto3.client(
     service_name = 'textract',
     region_name='us-east-2',
