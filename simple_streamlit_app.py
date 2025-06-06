@@ -4,6 +4,8 @@ from botocore.exceptions import ClientError
 import json
 import time
 import os
+from pathlib import Path
+from docx import Document
 
 with open('aws_account.txt') as f:
     lines = f.readlines()
@@ -103,58 +105,76 @@ def get_job_results(client, job_id):
 
     return pages
     
-uploaded_file = st.file_uploader("Choose a PDF file")
+# Define the prompt for the model.
+sys_prompt = f'''You are a server API that receives text and returns a JSON object with the content of the resume supplied. 
+
+Extract the candidate's name, job titles, company names, schools and skills. Provide a confidence score between 0 to 100 on how confident you are in each extraction. If you cannot find the field, leave it blank. An extraction schema for resume parsing can be define as follows:
+name: object
+    - candidate_name: string
+    - email: string
+    - location: string
+    - score: integer
+job_experience: object
+    - job_title: string
+    - company_name: string
+    - start_date: Date
+    - end_date: Date
+    - score: integer
+education: object
+    - school_name: string
+    - date: Date
+    - score: integer
+skills: object
+    - skill: Array
+    - score: integer
+    
+Do not infer any data based on previous training, strictly use only the user text given as input.
+''' 
+    
+uploaded_file = st.file_uploader("Choose a PDF, DOC, DOCX, PNG, JPEG OR TIFF file")
 
 
 if uploaded_file is not None:
+    file_type = Path(uploaded_file.name ).suffix
+    if file_type == ".pdf":
     # To read file as bytes:
-    s3_upload = upload_file(uploaded_file, 'resumeappllm', "st_upload.pdf")
-    job_id = start_job(textract_client, 'resumeappllm', 'st_upload.pdf')
-    job_status = is_job_complete(textract_client, job_id)
-    if job_status == "SUCCEEDED":
-        response = get_job_results(textract_client, job_id)
+        s3_upload = upload_file(uploaded_file, 'resumeappllm', "st_upload.pdf")
+        job_id = start_job(textract_client, 'resumeappllm', 'st_upload.pdf')
+        job_status = is_job_complete(textract_client, job_id)
+        if job_status == "SUCCEEDED":
+            response = get_job_results(textract_client, job_id)
+            documentText = ""
+            for result_page in response:
+                for item in result_page["Blocks"]:
+                    if item["BlockType"] == "LINE":
+                        documentText = documentText + ' ' + item["Text"]
+        
+        s3_client.delete_object(
+            Bucket='resumeappllm',
+            Key='st_upload.pdf')
+    elif file_type == ".doc" or  file_type == ".docx":
+        document = Document(uploaded_file)
         documentText = ""
-        for result_page in response:
-            for item in result_page["Blocks"]:
-                if item["BlockType"] == "LINE":
-                    documentText = documentText = documentText + ' ' + item["Text"]
+        for i in document.paragraphs:
+            documentText = documentText + ' ' + i.text 
+    elif file_type == ".png" or file_type == ".jpeg" or file_type == ".jpg"or file_type == ".tiff":
+        bytes_data = uploaded_file.getvalue()
+        ddt = textract_client.detect_document_text(Document={'Bytes':bytes_data})
+        documentText = ""
+        for item in ddt["Blocks"]:
+            if item["BlockType"] == "LINE":
+                documentText = documentText + ' ' + item["Text"]
                     
-        
-        # Define the prompt for the model.
-        sys_prompt = f'''You are a server API that receives text and returns a JSON object with the content of the resume supplied. 
-        
-        Extract the candidate's name, job titles, company names, schools and skills. Provide a confidence score between 0 to 100 on how confident you are in each extraction. If you cannot find the field, leave it blank. An extraction schema for resume parsing can be define as follows:
-        name: object
-            - candidate_name: string
-            - email: string
-            - location: string
-            - score: integer
-        job_experience: object
-            - job_title: string
-            - company_name: string
-            - start_date: Date
-            - end_date: Date
-            - score: integer
-        education: object
-            - school_name: string
-            - date: Date
-            - score: integer
-        skills: object
-            - skill: Array
-            - score: integer
-            
-        Do not infer any data based on previous training, strictly use only the user text given as input.
-        ''' 
-        
+    try:            
         # Embed the prompt in Llama 3's instruction format.
         formatted_prompt = f"""
-        <|begin_of_text|><|start_header_id|>sytem<|end_header_id|>
-        {sys_prompt}
-        <|eot_id|><|start_header_id|>user<|end_header_id|>
-        {documentText}
-       <|eot_id|><|start_header_id|>assistant<|end_header_id|>
-        """
-        
+            <|begin_of_text|><|start_header_id|>sytem<|end_header_id|>
+            {sys_prompt}
+            <|eot_id|><|start_header_id|>user<|end_header_id|>
+            {documentText}
+           <|eot_id|><|start_header_id|>assistant<|end_header_id|>
+            """
+            
         # Format the request payload using the model's native structure.
         native_request = {
             "prompt": formatted_prompt,
@@ -178,8 +198,6 @@ if uploaded_file is not None:
         # Extract and print the response text.
         response_text = model_response["generation"]
         response_text
+    except:
+        st.write("Please try again with a file type that is supported by this application.")
         
-    s3_client.delete_object(
-        Bucket='resumeappllm',
-        Key='st_upload.pdf',
-    )
