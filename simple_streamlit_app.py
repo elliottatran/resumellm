@@ -7,6 +7,13 @@ import os
 from pathlib import Path
 from docx import Document
 
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_chroma import Chroma
+
+with open('openai.txt') as f:
+    lines = f.readlines()
+    OPENAI_API_KEY = lines[0].strip()
+
 with open('aws_account.txt') as f:
     lines = f.readlines()
     key_id = lines[0].strip()
@@ -105,31 +112,23 @@ def get_job_results(client, job_id):
 
     return pages
     
-# Define the prompt for the model.
-sys_prompt = f'''You are a server API that receives text and returns a JSON object with the content of the resume supplied. 
+embeddings_model = OpenAIEmbeddings(model="text-embedding-3-large", api_key=OPENAI_API_KEY)
 
-Extract the candidate's name, job titles, company names, schools and skills. Provide a confidence score between 0 to 100 on how confident you are in each extraction. If you cannot find the field, leave it blank. An extraction schema for resume parsing can be define as follows:
-name: object
-    - candidate_name: string
-    - email: string
-    - location: string
-    - score: integer
-job_experience: object
-    - job_title: string
-    - company_name: string
-    - start_date: Date
-    - end_date: Date
-    - score: integer
-education: object
-    - school_name: string
-    - date: Date
-    - score: integer
-skills: object
-    - skill: Array
-    - score: integer
-    
-Do not infer any data based on previous training, strictly use only the user text given as input.
-''' 
+# initiate the model
+llm = ChatOpenAI(temperature=0.5, model='gpt-4o-mini', api_key=OPENAI_API_KEY)
+
+CHROMA_PATH = r"chroma_db"
+
+# connect to the chromadb
+vector_store = Chroma(
+    collection_name="example_collection",
+    embedding_function=embeddings_model,
+    persist_directory=CHROMA_PATH, 
+)
+
+# Set up the vectorstore to be the retriever
+num_results = 1
+retriever = vector_store.as_retriever(search_kwargs={'k': num_results})
     
 uploaded_file = st.file_uploader("Choose a PDF, DOC, DOCX, PNG, JPEG OR TIFF file")
 
@@ -166,38 +165,34 @@ if uploaded_file is not None:
                 documentText = documentText + ' ' + item["Text"]
                     
     try:            
-        # Embed the prompt in Llama 3's instruction format.
-        formatted_prompt = f"""
-            <|begin_of_text|><|start_header_id|>sytem<|end_header_id|>
-            {sys_prompt}
-            <|eot_id|><|start_header_id|>user<|end_header_id|>
-            {documentText}
-           <|eot_id|><|start_header_id|>assistant<|end_header_id|>
+        docs = retriever.invoke(documentText)
+
+        # add all the chunks to 'knowledge'
+        knowledge = ""
+
+        for doc in docs:
+            knowledge += doc.page_content+"\n\n"
+
+
+        # make the call to the LLM (including prompt)
+        if documentText is not None:
+
+
+            rag_prompt = f"""
+            You are a human resource professional who is hiring a data scientist. 
+            Review the resume in the "user input" section and give a summary.
+            Then provide a rating from 0 to 100 on how likely they are to get the job in comparison to other candidates in "The knowledge" section.
+            Do not infer any data based on previous training, strictly use information from "The knowledge" section and the user input.
+
+            User input: {documentText}
+
+            The knowledge: {knowledge}
+
             """
-            
-        # Format the request payload using the model's native structure.
-        native_request = {
-            "prompt": formatted_prompt,
-            "temperature": 0.2,
-        }
-        
-        # Convert the native request to JSON.
-        request = json.dumps(native_request)
-        
-        try:
-            # Invoke the model with the request.
-            response = client.invoke_model(modelId=model_id, body=request)
-        
-        except (ClientError, Exception) as e:
-            print(f"ERROR: Can't invoke '{model_id}'. Reason: {e}")
-            exit(1)
-        
-        # Decode the response body.
-        model_response = json.loads(response["body"].read())
-        
-        # Extract and print the response text.
-        response_text = model_response["generation"]
-        response_text
+
+            #print(rag_prompt)
+            response = llm.invoke(rag_prompt)
+            response.content
     except:
         st.write("Please try again with a file type that is supported by this application.")
         
